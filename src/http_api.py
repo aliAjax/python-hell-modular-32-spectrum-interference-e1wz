@@ -80,6 +80,8 @@ def build_handler(service, static_dir):
                     return self._send(201, service.create_item(payload, actor, role, region))
                 if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "sources":
                     return self._send(201, service.add_source(int(parts[2]), payload, actor, role, region))
+                if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "retests":
+                    return self._send(201, service.add_retest(int(parts[2]), payload, actor, role, region))
                 if len(parts) == 4 and parts[:2] == ["api", "items"] and parts[3] == "actions":
                     action = payload.pop("action", "")
                     if not action:

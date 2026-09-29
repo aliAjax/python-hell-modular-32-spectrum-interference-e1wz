@@ -68,6 +68,7 @@ def normalize_create(payload):
         "reporter": reporter,
         "measurement_revisions": [],
         "suspend_authorization": None,
+        "suspend_authorized_at": None,
         "_stable_key": stable_key,
     }
 
@@ -88,4 +89,20 @@ def normalize_source(payload):
         "region": region,
         "station_id": payload.get("station_id"),
         "frequency_mhz": payload.get("frequency_mhz"),
+    }
+
+
+def normalize_retest(payload):
+    """现场人员提交的复测：强度、时间、位置缺一不可，区域缺省跟随事件。"""
+    strength = number(payload, "strength_dbm")
+    measured_at = parse_timestamp(payload, "measured_at")
+    location = require_text(payload, "location")
+    note = payload.get("note")
+    if note is not None and not isinstance(note, str):
+        note = str(note)
+    return {
+        "strength_dbm": strength,
+        "measured_at": measured_at,
+        "location": location,
+        "note": (note or "").strip(),
     }

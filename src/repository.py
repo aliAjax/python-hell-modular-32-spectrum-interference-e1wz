@@ -59,6 +59,20 @@ class Repository:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(item_id) REFERENCES items(id)
                 );
+                CREATE TABLE IF NOT EXISTS retests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL,
+                    strength_dbm REAL NOT NULL,
+                    measured_at TEXT NOT NULL,
+                    location TEXT NOT NULL,
+                    region TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL,
+                    created_role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(item_id, measured_at, location),
+                    FOREIGN KEY(item_id) REFERENCES items(id)
+                );
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     item_id INTEGER,
@@ -204,6 +218,88 @@ class Repository:
                 value["payload"] = json.loads(value["payload"])
                 result.append(value)
             return result
+        finally:
+            conn.close()
+
+    def _row_to_retest(self, row):
+        result = dict(row)
+        result.pop("item_id", None)
+        return result
+
+    def list_retests(self, item_id):
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM retests WHERE item_id=? ORDER BY measured_at ASC, id ASC", (item_id,)
+            ).fetchall()
+            return [self._row_to_retest(row) for row in rows]
+        finally:
+            conn.close()
+
+    def add_retest(self, item_id, values, actor, role, reopen_builder=None):
+        """插入复测；若 reopen_builder 返回 (new_status,new_payload,event_payload)，
+        则在同一事务内把事件改回处置中。"""
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is None:
+                raise NotFoundError("item_not_found", "业务实体不存在")
+            try:
+                conn.execute(
+                    "INSERT INTO retests(item_id,strength_dbm,measured_at,location,region,note,created_by,created_role,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        item_id,
+                        values["strength_dbm"],
+                        values["measured_at"],
+                        values["location"],
+                        values["region"],
+                        values.get("note", ""),
+                        actor,
+                        role,
+                        now_iso(),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise ConflictError("duplicate_retest", "同一时间、同一位置的复测已经提交")
+            retest_row = conn.execute("SELECT * FROM retests WHERE id=last_insert_rowid()").fetchone()
+            retest = self._row_to_retest(retest_row)
+            self.append_audit(
+                conn,
+                item_id,
+                "retest_recorded",
+                actor,
+                role,
+                {
+                    "retest_id": retest["id"],
+                    "strength_dbm": retest["strength_dbm"],
+                    "measured_at": retest["measured_at"],
+                    "location": retest["location"],
+                    "region": retest["region"],
+                },
+            )
+            reopen = reopen_builder(retest, self._row_to_item(row)) if reopen_builder else None
+            if reopen:
+                new_status, new_payload, event_payload = reopen
+                version = int(row["version"]) + 1
+                conn.execute(
+                    "UPDATE items SET status=?,version=?,payload=?,updated_at=? WHERE id=?",
+                    (new_status, version, canonical_json(new_payload), now_iso(), item_id),
+                )
+                conn.execute(
+                    "INSERT INTO actions(item_id,action,actor,role,payload,created_at) VALUES(?,?,?,?,?,?)",
+                    (item_id, "reopen", actor, role, canonical_json(event_payload), now_iso()),
+                )
+                self.append_audit(conn, item_id, "reopen", actor, role, event_payload)
+            conn.execute("COMMIT")
+            return retest
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
         finally:
             conn.close()
 

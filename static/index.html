@@ -1,5 +1,280 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>无线电频谱干扰调查</title><body><h1>无线电频谱干扰调查与协调</h1><p>使用 JSON API 创建干扰事件、记录来源、定位和执行处置动作。</p><pre>GET /health
-GET /api/state
-POST /api/items
-POST /api/items/{id}/sources
-POST /api/items/{id}/actions</pre></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>无线电频谱干扰调查与协调</title>
+<style>
+  :root { --ok:#1a7f37; --bad:#c02d2d; --muted:#666; --line:#ddd; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; color:#222; }
+  header { background:#17324d; color:#fff; padding:10px 16px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  header input, header select { padding:4px 6px; border:none; border-radius:3px; }
+  main { display:flex; gap:16px; padding:16px; align-items:flex-start; flex-wrap:wrap; }
+  .panel { border:1px solid var(--line); border-radius:6px; padding:12px; }
+  #list-panel { width: 340px; flex-shrink:0; }
+  #detail-panel { flex:1; min-width:420px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:5px 6px; border-bottom:1px solid #eee; vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  tr.item { cursor:pointer; }
+  tr.item:hover { background:#f2f7ff; }
+  tr.item.active { background:#dcecff; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; }
+  .s-resolved { background:#d8f3dc; color:var(--ok); }
+  .s-coordinating,.s-suspended,.s-located,.s-assessed { background:#fff0d6; color:#9a6200; }
+  .s-pending { background:#eee; color:#555; }
+  .s-cancelled { background:#eee; color:#888; }
+  .ok { color:var(--ok); font-weight:600; }
+  .bad { color:var(--bad); font-weight:600; }
+  .muted { color:var(--muted); }
+  .box { border:1px solid var(--line); border-radius:6px; padding:10px 12px; margin:10px 0; }
+  .box.ok-box { border-color:var(--ok); background:#f3fbf5; }
+  .box.bad-box { border-color:var(--bad); background:#fdf4f4; }
+  form.inline { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin:8px 0; }
+  label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:2px; }
+  input,select,textarea,button { font:inherit; padding:5px 7px; border:1px solid #bbb; border-radius:4px; }
+  button { cursor:pointer; background:#17324d; color:#fff; border:none; padding:6px 14px; }
+  button.secondary { background:#666; }
+  button:disabled { background:#aaa; cursor:not-allowed; }
+  pre { background:#f6f6f6; padding:8px; border-radius:4px; overflow:auto; font-size:12px; max-height:260px; }
+  #msg { font-size:13px; }
+  #msg.error { color:var(--bad); } #msg.ok { color:var(--ok); }
+  h2 { font-size:15px; margin:14px 0 6px; }
+  h3 { font-size:13px; margin:0 0 8px; }
+  details summary { cursor:pointer; color:#17324d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>无线电频谱干扰调查与协调</h1>
+  <label style="color:#cdd8e3">用户
+    <input id="uid" value="coord-1" size="10"></label>
+  <label style="color:#cdd8e3">角色
+    <select id="role">
+      <option>coordinator</option><option>field_operator</option>
+      <option>analyst</option><option>monitor</option><option>regulator</option>
+    </select></label>
+  <label style="color:#cdd8e3">区域
+    <input id="region" value="north" size="8"></label>
+  <button class="secondary" onclick="loadList()">刷新</button>
+  <span id="msg"></span>
+</header>
+<main>
+  <section class="panel" id="list-panel">
+    <h3>事件列表</h3>
+    <table>
+      <thead><tr><th>ID</th><th>区域/台站</th><th>状态</th></tr></thead>
+      <tbody id="items"></tbody>
+    </table>
+    <h2>新建干扰事件（监测/分析）</h2>
+    <form class="inline" onsubmit="return createItem(event)">
+      <label>频率MHz<input name="frequency_mhz" value="2400" size="7"></label>
+      <label>带宽MHz<input name="bandwidth_mhz" value="20" size="7"></label>
+      <label>台站<input name="station_id" value="ST-01" size="7"></label>
+      <label>区域<input name="region" value="north" size="7"></label>
+      <label>强度dBm<input name="strength_dbm" value="-35" size="6"></label>
+      <label>发现时间<input name="detected_at" value="2026-09-27T10:00:00+00:00" size="22"></label>
+      <label>报告人<input name="reporter" value="monitor-1" size="8"></label>
+      <button>创建</button>
+    </form>
+  </section>
+
+  <section class="panel" id="detail-panel">
+    <div id="detail"><p class="muted">← 选择左侧事件查看详情、提交复测或结案。</p></div>
+  </section>
+</main>
+
+<script>
+const STATUS_CN = {pending:"待评估", assessed:"已评估", located:"已定位", suspended:"已停用授权",
+  coordinating:"处置中", resolved:"已结案", cancelled:"已撤销"};
+let currentId = null;
+
+function headers() {
+  return {"Content-Type":"application/json",
+    "X-User-Id": document.getElementById("uid").value.trim(),
+    "X-Role": document.getElementById("role").value,
+    "X-Region": document.getElementById("region").value.trim()};
+}
+function msg(text, ok) {
+  const el = document.getElementById("msg");
+  el.textContent = text; el.className = ok ? "ok" : "error";
+  if (ok) setTimeout(() => { el.textContent = ""; el.className = ""; }, 4000);
+}
+async function api(method, path, body) {
+  const res = await fetch(path, {method, headers: headers(),
+    body: body ? JSON.stringify(body) : undefined});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.message || ("HTTP " + res.status)), {code: data.error});
+  return data;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function nowIso() {
+  const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+async function loadList() {
+  const state = await api("GET", "/api/state");
+  const tbody = document.getElementById("items");
+  tbody.innerHTML = "";
+  for (const it of state.items) {
+    const tr = document.createElement("tr");
+    tr.className = "item" + (it.id === currentId ? " active" : "");
+    tr.onclick = () => loadDetail(it.id);
+    tr.innerHTML = `<td>${it.id}</td><td>${esc(it.payload.region)} / ${esc(it.payload.station_id)}</td>
+      <td><span class="badge s-${it.status}">${STATUS_CN[it.status] || it.status}</span></td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function createItem(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  try {
+    const it = await api("POST", "/api/items", Object.fromEntries(new FormData(f)));
+    msg("已创建事件 #" + it.id, true);
+    await loadList(); await loadDetail(it.id);
+  } catch (e) { msg(e.message); }
+  return false;
+}
+
+async function act(action, payload, label) {
+  const version = Number(document.getElementById("version").dataset.version);
+  try {
+    await api("POST", `/api/items/${currentId}/actions`, Object.assign({action, expected_version: version}, payload));
+    msg(label + "成功", true);
+    await loadList(); await loadDetail(currentId);
+  } catch (e) { msg(label + "失败：" + e.message); }
+}
+
+async function submitRetest(ev) {
+  ev.preventDefault();
+  const f = ev.target;
+  let measured_at = f.measured_at.value;
+  if (measured_at.length === 16) measured_at += ":00";
+  try {
+    const r = await api("POST", `/api/items/${currentId}/retests`, {
+      strength_dbm: Number(f.strength_dbm.value),
+      measured_at, location: f.location.value, note: f.note.value});
+    msg(`复测已提交：${r.cleared ? "达标（干扰消除）" : "超标"}`, true);
+    await loadList(); await loadDetail(currentId);
+  } catch (e) { msg("复测提交失败：" + e.message); }
+  return false;
+}
+
+function actionBar(it) {
+  const v = it.version, p = it.payload;
+  const forms = [];
+  if (["pending","assessed"].includes(it.status))
+    forms.push(`<button onclick="act('assess',{},'评估')">评估影响</button>`);
+  if (["assessed","located"].includes(it.status))
+    forms.push(`<form class="inline" onsubmit="return actForm(event,'locate','定位')">
+      <label>位置<input name="location" value="${esc(p.location?.label||'cell-7')}"></label>
+      <label>置信度<input name="confidence" value="0.9" size="5"></label>
+      <button>定位（≥0.6）</button></form>`);
+  if (["located","suspended"].includes(it.status))
+    forms.push(`<form class="inline" onsubmit="return actForm(event,'suspend','签发停用授权')">
+      <label>停用授权编号<input name="authorization_code" value="REG-${esc(p.region||'').toUpperCase()}-1" size="14"></label>
+      <label>授权时间<input name="authorized_at" value="${nowIso()}" size="17"></label>
+      <button>签发/重签停用授权</button></form>`);
+  if (it.status === "suspended")
+    forms.push(`<form class="inline" onsubmit="return actForm(event,'coordinate','协调')">
+      <label>协调协议<input name="coordination_agreement" value="AGC-1"></label>
+      <button>进入协调处置</button></form>`);
+  if (it.status === "coordinating") {
+    const ready = it.resolve_readiness;
+    forms.push(`<form class="inline" onsubmit="return actForm(event,'resolve','结案')">
+      <label>结案证据说明<input name="evidence" value="复测达标，干扰消除" size="22"></label>
+      <button ${ready.can_resolve ? "" : "disabled title='当前不满足结案条件'"}>依据复测结案</button>
+    </form>`);
+  }
+  return forms.join("") || `<p class="muted">当前状态无可用操作。</p>`;
+}
+
+async function actForm(ev, action, label) {
+  ev.preventDefault();
+  const payload = Object.fromEntries(new FormData(ev.target));
+  await act(action, payload, label);
+  return false;
+}
+
+function retestTable(retests, authorizedAt, region) {
+  if (!retests.length) return `<p class="muted">暂无复测记录。</p>`;
+  const rows = retests.map(r => {
+    const eligible = authorizedAt && r.region === region && r.measured_at > authorizedAt;
+    return `<tr><td>${r.id}</td><td>${esc(r.measured_at)}</td><td>${esc(r.location)}</td>
+      <td class="${r.cleared ? "ok" : "bad"}">${r.strength_dbm}</td>
+      <td>${r.cleared ? '<span class="ok">达标</span>' : '<span class="bad">超标</span>'}</td>
+      <td>${eligible ? '<span class="ok">计入</span>' : '<span class="muted">不计入</span>'}</td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>#</th><th>复测时间</th><th>位置</th><th>强度 dBm</th><th>结论</th><th>是否计入结案</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+async function loadDetail(id) {
+  currentId = id;
+  let it;
+  try { it = await api("GET", "/api/items/" + id); }
+  catch (e) { msg(e.message); return; }
+  await loadList();
+  const p = it.payload, ready = it.resolve_readiness;
+  const threshold = ready.clearance_strength_dbm;
+  const retestOpen = ["located","suspended","coordinating","resolved"].includes(it.status);
+  document.getElementById("detail").innerHTML = `
+    <h3>事件 #${it.id}（版本 <span id="version" data-version="${it.version}">${it.version}</span>）
+      <span class="badge s-${it.status}">${STATUS_CN[it.status] || it.status}</span></h3>
+    <table>
+      <tr><th>频率/带宽</th><td>${p.frequency_mhz} MHz / ${p.bandwidth_mhz} MHz</td>
+          <th>区域/台站</th><td>${esc(p.region)} / ${esc(p.station_id)}</td></tr>
+      <tr><th>初始强度</th><td>${p.strength_dbm} dBm</td><th>发现时间</th><td>${esc(p.detected_at)}</td></tr>
+      <tr><th>停用授权</th><td>${p.suspend_authorization ? esc(p.suspend_authorization)
+            + " <span class='muted'>(" + esc(p.suspend_authorized_at) + " 签发)</span>" : '<span class="muted">尚未签发</span>'}</td>
+          <th>影响评估</th><td>${it.assessment.level}（${it.assessment.score}）</td></tr>
+    </table>
+
+    <div class="box ${ready.can_resolve ? "ok-box" : "bad-box"}">
+      <h3>结案条件（跟着复测证据走）</h3>
+      <p>结案必须同时满足：① 已签发停用授权；② 存在<b>授权时间之后</b>、<b>同一区域</b>的复测；
+         ③ 其中<b>最新一条复测强度 ≤ ${threshold} dBm</b>（超标则不能结案）。
+         结案后若补录更晚的超标复测，事件自动回到“处置中”；晚到的旧结果只进入复测历史。</p>
+      <p class="${ready.can_resolve ? "ok" : "bad"}">${ready.can_resolve ? "✓ " : "✗ "}${esc(ready.reason)}</p>
+      ${ready.latest_retest ? `<p class="muted">最新计入复测 #${ready.latest_retest.id}：${esc(ready.latest_retest.measured_at)}
+        @ ${esc(ready.latest_retest.location)}，${ready.latest_retest.strength_dbm} dBm</p>` : ""}
+    </div>
+
+    <h2>复测记录（授权之后、同区域才计入结案）</h2>
+    ${retestTable(it.retests, p.suspend_authorized_at, p.region)}
+    ${retestOpen ? `
+    <form class="inline" onsubmit="return submitRetest(event)">
+      <label>复测强度 dBm<input name="strength_dbm" value="-85" size="7"></label>
+      <label>复测时间<input name="measured_at" type="datetime-local" value="${nowIso()}" size="17"></label>
+      <label>复测位置<input name="location" value="${esc(p.location?.label||'cell-7')}" size="10"></label>
+      <label>备注<input name="note" size="14"></label>
+      <button>提交复测</button>
+      <span class="muted">现场人员提交；区域自动归属事件区域「${esc(p.region)}」。</span>
+    </form>` : `<p class="muted">定位之后才能提交复测。</p>`}
+
+    ${p.resolution ? `<div class="box"><h3>结案记录</h3>
+      <table>
+        <tr><th>结案证据</th><td>${esc(p.resolution.evidence)}</td></tr>
+        <tr><th>依据复测</th><td>#${p.resolution.basis_retest_id}，${esc(p.resolution.basis_measured_at)}
+          @ ${esc(p.resolution.basis_location)}，${p.resolution.basis_strength_dbm} dBm</td></tr>
+        <tr><th>结案时间</th><td>${esc(p.resolution.resolved_at)}（${esc(p.resolution.actor)}）</td></tr>
+      </table></div>` : ""}
+    ${(p.reopen_history||[]).length ? `<div class="box bad-box"><h3>重开记录（${p.reopen_history.length} 次）</h3>
+      ${p.reopen_history.map(r => `<p>因复测 #${r.retest_id}（${esc(r.measured_at)} @ ${esc(r.location)}，
+        <span class="bad">${r.strength_dbm} dBm 超标</span>）于 ${esc(r.reopened_at)} 回到处置中，
+        原结案记录保留。</p>`).join("")}</div>` : ""}
+
+    <h2>处置操作</h2>${actionBar(it)}
+
+    <details><h2>审计链</h2><pre>${esc(JSON.stringify(it.audit, null, 2))}</pre></details>
+  `;
+}
+
+loadList().catch(e => msg(e.message));
+</script>
+</body>
+</html>
