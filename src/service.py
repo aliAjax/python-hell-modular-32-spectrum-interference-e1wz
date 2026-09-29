@@ -1,5 +1,6 @@
 from . import domain, rules
 from .domain import DomainError
+from .repository import now_iso
 
 
 class Service:
@@ -49,7 +50,9 @@ class Service:
                 raise DomainError("region_mismatch", "不能处理其他区域的记录", 403)
         if action in rules.ACTION_REQUIRES_VERSION and expected_version is None:
             raise DomainError("expected_version_required", "该操作需要 expected_version", 400)
-        new_status, new_payload, event_payload = rules.apply_action(item, action, payload, actor, role)
+        new_status, new_payload, event_payload = rules.apply_action(
+            item, action, payload, actor, role, region=region, at_iso=now_iso()
+        )
         self.repository.apply_action(
             item_id, action, actor, role, new_status, new_payload, event_payload, expected_version
         )
@@ -60,6 +63,8 @@ class Service:
         item["sources"] = self.repository.list_sources(item_id)
         item["audit"] = self.repository.audit_trail(item_id)
         item["assessment"] = rules.assess(item["payload"])
+        item["closure"] = rules.closure_evaluation(item["payload"])
+        item["retests"] = rules.retests_view(item["payload"])
         return item
 
     def list_items(self, status=None):

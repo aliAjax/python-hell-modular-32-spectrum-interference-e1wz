@@ -1,5 +1,290 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>无线电频谱干扰调查</title><body><h1>无线电频谱干扰调查与协调</h1><p>使用 JSON API 创建干扰事件、记录来源、定位和执行处置动作。</p><pre>GET /health
-GET /api/state
-POST /api/items
-POST /api/items/{id}/sources
-POST /api/items/{id}/actions</pre></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>无线电频谱干扰调查与协调</title>
+<style>
+  :root { --line:#d7dde5; --ok:#1a7f37; --bad:#c0392b; --warn:#9a6700; --bg:#f4f6f9; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--bg); color:#1f2933; }
+  header { background:#12355b; color:#fff; padding:12px 20px; }
+  header h1 { margin:0; font-size:18px; }
+  .wrap { display:grid; grid-template-columns:340px 1fr; gap:16px; padding:16px 20px; align-items:start; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:15px; }
+  label { display:block; font-size:12px; color:#52606d; margin:8px 0 3px; }
+  input, select, textarea { width:100%; padding:6px 8px; border:1px solid var(--line); border-radius:5px; font-size:13px; font-family:inherit; }
+  button { padding:7px 14px; border:0; border-radius:5px; background:#12355b; color:#fff; font-size:13px; cursor:pointer; margin-top:10px; }
+  button.ghost { background:#e4e9f0; color:#12355b; }
+  button:disabled { background:#b8c2cc; cursor:not-allowed; }
+  .item { border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin-bottom:6px; cursor:pointer; font-size:13px; }
+  .item:hover, .item.active { border-color:#12355b; background:#eef3f9; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; background:#e4e9f0; }
+  .pill.resolved { background:#d8f3dc; color:var(--ok); }
+  .pill.coordinating, .pill.suspended { background:#fff3cd; color:var(--warn); }
+  .ok { color:var(--ok); font-weight:600; }
+  .bad { color:var(--bad); font-weight:600; }
+  .muted { color:#7b8794; font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { border-bottom:1px solid var(--line); padding:5px 6px; text-align:left; vertical-align:top; }
+  th { color:#52606d; font-weight:600; }
+  .banner { border-radius:6px; padding:9px 12px; font-size:13px; margin-bottom:10px; }
+  .banner.ok { background:#d8f3dc; }
+  .banner.bad { background:#fde2e0; }
+  .banner.warn { background:#fff3cd; }
+  #msg { font-size:12px; margin-top:8px; white-space:pre-wrap; }
+  ul.audit { font-size:12px; padding-left:18px; margin:4px 0; max-height:260px; overflow:auto; }
+  .tag-no { color:var(--bad); }
+  .tag-yes { color:var(--ok); }
+  code { background:#f0f3f7; padding:0 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>无线电频谱干扰调查与协调</h1>
+</header>
+<div class="wrap">
+  <div>
+    <div class="card">
+      <h2>当前身份</h2>
+      <label>用户 ID</label><input id="uid" value="field-1">
+      <label>角色</label>
+      <select id="role">
+        <option value="analyst">analyst 分析员</option>
+        <option value="monitor">monitor 监测员</option>
+        <option value="field_operator" selected>field_operator 现场人员</option>
+        <option value="coordinator">coordinator 协调员</option>
+        <option value="regulator">regulator 监管</option>
+      </select>
+      <label>管辖区域（X-Region，复测默认归属此区域）</label><input id="region" value="north">
+    </div>
+
+    <div class="card">
+      <h2>新建干扰事件</h2>
+      <label>台站 station_id</label><input id="f_station" value="ST-01">
+      <label>区域 region</label><input id="f_region" value="north">
+      <label>频率 MHz</label><input id="f_freq" type="number" step="0.001" value="2400">
+      <label>带宽 MHz</label><input id="f_bw" type="number" step="0.001" value="20">
+      <label>初始强度 dBm</label><input id="f_strength" type="number" step="0.1" value="-35">
+      <label>发现时间</label><input id="f_detected" type="datetime-local">
+      <label>上报人</label><input id="f_reporter" value="monitor-1">
+      <button onclick="createItem()">创建事件</button>
+    </div>
+
+    <div class="card">
+      <h2>事件列表</h2>
+      <button class="ghost" onclick="loadState()">刷新</button>
+      <div id="items"></div>
+    </div>
+  </div>
+
+  <div id="detail"><div class="card muted">从左侧选择一个事件查看详情、提交复测或结案。</div></div>
+</div>
+
+<script>
+let state = { items: [], selected: null, detail: null };
+const $ = id => document.getElementById(id);
+
+function headers() {
+  return {
+    "Content-Type": "application/json",
+    "X-User-Id": $("uid").value.trim(),
+    "X-Role": $("role").value,
+    "X-Region": $("region").value.trim()
+  };
+}
+
+function isoLocal(input) {
+  const v = input.value;
+  return v ? new Date(v).toISOString() : "";
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, { method, headers: headers(), body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw Object.assign(new Error((data && data.message) || res.status), { code: data && data.error });
+  return data;
+}
+
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+async function loadState() {
+  const data = await api("GET", "/api/state");
+  state.items = data.items || [];
+  $("items").innerHTML = state.items.map(it => `
+    <div class="item ${state.selected === it.id ? "active" : ""}" onclick="selectItem(${it.id})">
+      <span class="pill ${esc(it.status)}">${esc(it.status)}</span>
+      #${it.id} · ${esc(it.payload.station_id)} · ${esc(it.payload.region)}<br>
+      <span class="muted">${esc(it.payload.frequency_mhz)} MHz · v${it.version}</span>
+    </div>`).join("") || '<p class="muted">暂无事件</p>';
+}
+
+async function createItem() {
+  try {
+    const body = {
+      station_id: $("f_station").value.trim(),
+      region: $("f_region").value.trim(),
+      frequency_mhz: Number($("f_freq").value),
+      bandwidth_mhz: Number($("f_bw").value),
+      strength_dbm: Number($("f_strength").value),
+      detected_at: isoLocal($("f_detected")) || new Date().toISOString(),
+      reporter: $("f_reporter").value.trim()
+    };
+    const it = await api("POST", "/api/items", body);
+    state.selected = it.id;
+    await loadState();
+    await selectItem(it.id);
+  } catch (e) { alert("创建失败：" + e.message); }
+}
+
+async function selectItem(id) {
+  state.selected = id;
+  try {
+    state.detail = await api("GET", "/api/items/" + id);
+    render();
+    loadState();
+  } catch (e) { alert(e.message); }
+}
+
+async function act(action, body) {
+  const it = state.detail;
+  try {
+    const payload = Object.assign({ action, expected_version: it.version }, body || {});
+    await api("POST", `/api/items/${it.id}/actions`, payload);
+    await selectItem(it.id);
+  } catch (e) {
+    const at = $("msg"); if (at) at.innerHTML = `<span class="bad">${esc(action)} 被拒绝（${esc(e.code)}）：${esc(e.message)}</span>`;
+  }
+}
+
+function closureCard(d) {
+  const c = d.closure;
+  let cls = "warn", text = c.reason;
+  if (c.cleared) { cls = "ok"; }
+  else if (!c.authorized || c.eligible_retests === 0) { cls = "warn"; }
+  else { cls = "bad"; }
+  const latest = c.latest_retest ? `
+    <table>
+      <tr><th>复测序号</th><td>#${esc(latest.seq)}</td></tr>
+      <tr><th>强度</th><td class="${latest.strength_dbm <= c.clear_threshold_dbm ? "tag-yes" : "tag-no"}">${esc(latest.strength_dbm)} dBm</td></tr>
+      <tr><th>测量时间</th><td>${esc(latest.measured_at)}</td></tr>
+      <tr><th>位置</th><td>${esc(latest.location)}</td></tr>
+      <tr><th>区域</th><td>${esc(latest.region)}</td></tr>
+    </table>` : "<p class='muted'>尚无符合条件的复测。</p>";
+  return `
+    <div class="banner ${cls}"><strong>结案条件：</strong>必须存在<strong>停用授权之后</strong>、<strong>同一区域（${esc(d.payload.region)}）</strong>的复测，且<strong>最新一条</strong>复测强度 ≤ ${esc(c.clear_threshold_dbm)} dBm。勾选不能替代证据。</div>
+    <table>
+      <tr><th>停用授权</th><td>${c.authorized ? `<span class="tag-yes">已签发 ${esc(d.payload.suspend_authorization)}</span> @ ${esc(d.payload.suspend_authorized_at)}` : '<span class="tag-no">未签发</span>'}</td></tr>
+      <tr><th>可作为依据的复测</th><td>${c.eligible_retests} 条（区域不一致或早于授权的复测不计入）</td></tr>
+      <tr><th>当前判定</th><td class="${c.cleared ? "ok" : "bad"}">${c.cleared ? "可以结案" : "不能结案"} —— ${esc(c.reason)}</td></tr>
+    </table>
+    <h2 style="margin-top:12px">最新依据复测</h2>${latest}
+    <button ${c.cleared ? "" : "disabled"} onclick="resolvePrompt()">协调员结案（需填写证据编号）</button>
+    ${c.cleared ? "" : '<p class="muted">未满足结案条件时按钮不可用。</p>'}
+    <div id="msg"></div>`;
+}
+
+function retestHistory(d) {
+  const rows = (d.retests || []).map(r => `
+    <tr>
+      <td>#${esc(r.seq)}</td>
+      <td class="${r.clears ? "tag-yes" : "tag-no"}">${esc(r.strength_dbm)}</td>
+      <td>${esc(r.measured_at)}</td>
+      <td>${esc(r.location)}</td>
+      <td>${esc(r.region || "-")}</td>
+      <td>${r.eligible ? '<span class="tag-yes">计入</span>' : `<span class="tag-no">不计入</span><div class="muted">${esc(r.excluded_reason)}</div>`}</td>
+      <td>${esc(r.actor)}</td>
+    </tr>`).join("");
+  return `<table>
+    <tr><th>#</th><th>强度 dBm</th><th>测量时间</th><th>位置</th><th>复测区域</th><th>是否计入结案</th><th>提交人</th></tr>
+    ${rows || '<tr><td colspan="7" class="muted">暂无复测记录</td></tr>'}
+  </table>`;
+}
+
+function actionForms(d) {
+  const s = d.status, p = d.payload;
+  let html = "";
+  if (["pending", "assessed"].includes(s))
+    html += `<button onclick="act('assess', {})">评估 assess</button>`;
+  if (["assessed", "located"].includes(s))
+    html += ` <label>定位位置</label><input id="a_loc" value="cell-7">
+      <label>定位置信度（≥0.6）</label><input id="a_conf" type="number" min="0" max="1" step="0.01" value="0.9">
+      <button onclick="act('locate', {location:$('a_loc').value, confidence:Number($('a_conf').value)})">定位 locate</button>`;
+  if (["located", "suspended"].includes(s))
+    html += ` <label>停用授权编号（REG- 开头）</label><input id="a_auth" value="REG-NORTH-1">
+      <button onclick="act('suspend', {authorization_code:$('a_auth').value.trim()})">签发停用授权 suspend</button>`;
+  if (s === "suspended")
+    html += ` <label>协调协议号</label><input id="a_agree" value="AGC-7">
+      <button onclick="act('coordinate', {coordination_agreement:$('a_agree').value.trim()})">进入协调处置 coordinate</button>`;
+  return html ? `<h2>流程操作</h2>${html}` : "";
+}
+
+function retestForm(d) {
+  if (!["suspended", "coordinating", "resolved"].includes(d.status)) return "";
+  const defaultLocation = (d.payload.location && d.payload.location.label) || "cell-7";
+  const reopenHint = d.status === "resolved"
+    ? `<p class="muted">事件已结案。若在此补录<strong>测量时间更晚、同区域且强度仍超标</strong>的复测，事件将自动回到处置中，原结案记录保留在结案历史；测量时间更早的旧结果只进入复测历史，不改变结论。</p>` : "";
+  return `
+    <h2>提交现场复测</h2>
+    ${reopenHint}
+    <label>复测强度 dBm（≤ ${esc(d.closure.clear_threshold_dbm)} 视为消除）</label>
+    <input id="r_strength" type="number" step="0.1" value="-85">
+    <label>测量时间</label><input id="r_time" type="datetime-local">
+    <label>复测位置</label><input id="r_loc" value="${esc(defaultLocation)}">
+    <label>复测区域（默认当前身份区域）</label><input id="r_region" value="${esc($("region").value.trim())}">
+    <button onclick="submitRetest()">提交复测 retest</button>`;
+}
+
+async function submitRetest() {
+  const measured = isoLocal($("r_time"));
+  if (!measured) { alert("请填写测量时间"); return; }
+  await act("retest", {
+    strength_dbm: Number($("r_strength").value),
+    measured_at: measured,
+    location: $("r_loc").value.trim(),
+    region: $("r_region").value.trim() || null
+  });
+}
+
+async function resolvePrompt() {
+  const evidence = prompt("结案证据编号（如复测报告/扫描记录号）：", "scan-7");
+  if (evidence && evidence.trim()) await act("resolve", { evidence: evidence.trim() });
+}
+
+function historyAndAudit(d) {
+  const rh = (d.payload.resolution_history || []).map((h, i) => `
+    <li>#${i + 1} 结案证据 ${esc(h.evidence)}，依据复测 #${esc(h.retest && h.retest.seq)}（${esc(h.retest && h.retest.strength_dbm)} dBm @ ${esc(h.retest && h.retest.measured_at)}），
+      结案人 ${esc(h.resolved_by)} @ ${esc(h.resolved_at)}；<span class="bad">被复测 #${esc(h.superseded_by_retest_seq)} 于 ${esc(h.superseded_at)} 推翻</span></li>`).join("");
+  const audit = (d.audit || []).map(e => {
+    const reopened = e.payload && e.payload.reopened ? ' <span class="bad">[翻案：回到处置中]</span>' : "";
+    return `<li><code>${esc(e.event_type)}</code> by ${esc(e.actor)}/${esc(e.role)} @ ${esc(e.created_at)}${reopened}<br><span class="muted">${esc(JSON.stringify(e.payload))}</span></li>`;
+  }).join("");
+  return `
+    ${rh ? `<h2>结案历史（原记录保留）</h2><ul class="audit">${rh}</ul>` : ""}
+    <h2>审计链</h2><ul class="audit">${audit}</ul>`;
+}
+
+function render() {
+  const d = state.detail;
+  if (!d) return;
+  $("detail").innerHTML = `
+    <div class="card">
+      <h2>事件 #${d.id} <span class="pill ${esc(d.status)}">${esc(d.status)}</span> <span class="muted">v${d.version}</span></h2>
+      <p class="muted">${esc(d.payload.station_id)} · ${esc(d.payload.region)} · ${esc(d.payload.frequency_mhz)} MHz / ${esc(d.payload.bandwidth_mhz)} MHz · 当前强度 ${esc(d.payload.strength_dbm)} dBm · 影响等级 ${esc(d.assessment.level)}（${esc(d.assessment.score)} 分）</p>
+    </div>
+    <div class="card"><h2>结案判定</h2>${closureCard(d)}</div>
+    <div class="card">${actionForms(d)}${retestForm(d)}</div>
+    <div class="card"><h2>复测历史</h2>${retestHistory(d)}</div>
+    <div class="card">${historyAndAudit(d)}</div>`;
+}
+
+$("f_detected").value = new Date(Date.now() - 3600000).toISOString().slice(0, 16);
+$("role").addEventListener("change", () => { if (state.detail) render(); });
+loadState();
+</script>
+</body>
+</html>

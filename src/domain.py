@@ -72,6 +72,23 @@ def normalize_create(payload):
     }
 
 
+def normalize_retest(payload, actor_region=None):
+    strength = number(payload, "strength_dbm")
+    measured_at = parse_timestamp(payload, "measured_at")
+    location = require_text(payload, "location")
+    region = payload.get("region")
+    if region is not None:
+        region = str(region).strip() or None
+    if not region:
+        region = actor_region
+    return {
+        "strength_dbm": strength,
+        "measured_at": measured_at,
+        "location": location,
+        "region": region,
+    }
+
+
 def normalize_source(payload):
     source_type = require_text(payload, "source_type")
     external_id = require_text(payload, "external_id")
